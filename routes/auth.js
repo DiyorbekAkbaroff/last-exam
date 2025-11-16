@@ -1,238 +1,208 @@
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
-const { generateToken, generateRefreshToken } = require('../utils/jwt');
-const { generateSecret, verifyToken, generateQRCode } = require('../utils/twoFactor');
-const { auth } = require('../middleware/auth');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const { body, validationResult } = require('express-validator');
 
-/**
- * @swagger
- * /api/auth/register:
- *   post:
- *     summary: Register a new user with 2FA
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - name
- *               - email
- *               - password
- *             properties:
- *               name:
- *                 type: string
- *               email:
- *                 type: string
- *               password:
- *                 type: string
- *     responses:
- *       201:
- *         description: User registered successfully
- *       400:
- *         description: User already exists
- */
-router.post('/register', async (req, res) => {
+const { 
+  generateToken, 
+  generateRefreshToken 
+} = require('../utils/jwt');
+
+const sendError = (res, code, message, errorCode = null, errors = null) => {
+  const response = {
+    success: false,
+    message,
+    ...(errorCode && { code: errorCode }),
+    ...(errors && { errors }),
+    ...(process.env.NODE_ENV === 'development' && errors && { debug: errors })
+  };
+  
+  return res.status(code).json(response);
+};
+
+// Input validation middleware
+const validateRegister = [
+  body('name')
+    .trim()
+    .isLength({ min: 2, max: 50 })
+    .withMessage('Name must be between 2 and 50 characters')
+    .escape(),
+  body('email')
+    .isEmail()
+    .withMessage('Please provide a valid email')
+    .normalizeEmail()
+    .custom(async (value) => {
+      const user = await User.findOne({ email: value });
+      if (user) {
+        throw new Error('Email already in use');
+      }
+      return true;
+    }),
+  body('password')
+    .isLength({ min: 6 })
+    .withMessage('Password must be at least 6 characters long')
+];
+
+router.post('/register', validateRegister, async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return sendError(res, 400, 'Validation failed', 'VALIDATION_ERROR', errors.array());
+  }
+
   try {
     const { name, email, password } = req.body;
 
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({ message: 'User already exists' });
-    }
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
 
-    const secret = generateSecret(email);
     const user = new User({
       name,
       email,
-      password,
-      twoFactorSecret: secret.base32,
-      twoFactorEnabled: true
+      password: hashedPassword,
+      status: 'active'
     });
+
     await user.save();
 
-    const qrCode = await generateQRCode(secret.otpauth_url);
+    // Generate JWT token
+    const token = generateToken(user._id);
+    const refreshToken = generateRefreshToken(user._id);
+
+    // Omit sensitive data from response
+    const userResponse = user.toObject();
+    delete userResponse.password;
+    delete userResponse.__v;
 
     res.status(201).json({
-      message: 'User registered. Please scan QR code for 2FA',
-      qrCode,
-      secret: secret.base32
+      success: true,
+      message: 'User registered successfully',
+      data: {
+        user: userResponse,
+        token,
+        refreshToken
+      }
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Registration error:', error);
+    sendError(res, 500, 'Error registering user', 'REGISTRATION_ERROR', error.message);
   }
 });
 
-/**
- * @swagger
- * /api/auth/login:
- *   post:
- *     summary: Login with 2FA
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - email
- *               - password
- *               - token
- *             properties:
- *               email:
- *                 type: string
- *               password:
- *                 type: string
- *               token:
- *                 type: string
- *     responses:
- *       200:
- *         description: Login successful
- *       401:
- *         description: Invalid credentials
- */
-router.post('/login', async (req, res) => {
+// Login validation
+const validateLogin = [
+  body('email')
+    .isEmail()
+    .withMessage('Please provide a valid email')
+    .normalizeEmail(),
+  body('password')
+    .notEmpty()
+    .withMessage('Password is required')
+];
+
+router.post('/login', validateLogin, async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return sendError(res, 400, 'Validation failed', 'VALIDATION_ERROR', errors.array());
+  }
+
   try {
-    const { email, password, token } = req.body;
+    const { email, password } = req.body;
 
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+      return sendError(res, 401, 'Invalid credentials', 'INVALID_CREDENTIALS');
     }
 
-    const isPasswordValid = await user.comparePassword(password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ message: 'Invalid credentials' });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return sendError(res, 401, 'Invalid credentials', 'INVALID_CREDENTIALS');
     }
 
-    if (user.twoFactorEnabled) {
-      if (!token) {
-        return res.status(400).json({ message: '2FA token required' });
-      }
-
-      const isValidToken = verifyToken(user.twoFactorSecret, token);
-      if (!isValidToken) {
-        return res.status(401).json({ message: 'Invalid 2FA token' });
-      }
+    // Check if account is active
+    if (user.status !== 'active') {
+      return sendError(res, 403, 'Account is not active', 'ACCOUNT_INACTIVE');
     }
 
+    // Generate tokens
     const accessToken = generateToken(user._id);
     const refreshToken = generateRefreshToken(user._id);
 
-    user.refreshToken = refreshToken;
-    await user.save();
+    // Omit sensitive data from response
+    const userResponse = user.toObject();
+    delete userResponse.password;
+    delete userResponse.__v;
 
     res.json({
-      accessToken,
-      refreshToken,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role
+      success: true,
+      message: 'Login successful',
+      data: {
+        user: userResponse,
+        token: accessToken,
+        refreshToken
       }
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    return sendError(res, 500, error.message);
   }
 });
 
-/**
- * @swagger
- * /api/auth/refresh:
- *   post:
- *     summary: Refresh access token
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - refreshToken
- *             properties:
- *               refreshToken:
- *                 type: string
- *     responses:
- *       200:
- *         description: Tokens refreshed successfully
- *       401:
- *         description: Invalid refresh token
- */
-router.post('/refresh', async (req, res) => {
+router.post('/refresh-token', async (req, res) => {
   try {
     const { refreshToken } = req.body;
-
+    
     if (!refreshToken) {
-      return res.status(401).json({ message: 'Refresh token required' });
+      return sendError(res, 400, 'Refresh token is required', 'REFRESH_TOKEN_REQUIRED');
     }
 
-    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-    const user = await User.findById(decoded.userId);
+    try {
+      const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+      const user = await User.findById(decoded.userId);
+      
+      if (!user) {
+        return sendError(res, 404, 'User not found', 'USER_NOT_FOUND');
+      }
 
-    if (!user || user.refreshToken !== refreshToken) {
-      return res.status(401).json({ message: 'Invalid refresh token' });
+      // Generate new tokens
+      const newAccessToken = generateToken(user._id);
+      const newRefreshToken = generateRefreshToken(user._id);
+
+      res.json({
+        success: true,
+        message: 'Token refreshed successfully',
+        data: {
+          token: newAccessToken,
+          refreshToken: newRefreshToken
+        }
+      });
+    } catch (error) {
+      return sendError(
+        res, 
+        401, 
+        error.name === 'TokenExpiredError' ? 'Refresh token has expired' : 'Invalid refresh token',
+        'INVALID_REFRESH_TOKEN'
+      );
     }
-
-    const newAccessToken = generateToken(user._id);
-    const newRefreshToken = generateRefreshToken(user._id);
-
-    user.refreshToken = newRefreshToken;
-    await user.save();
-
-    res.json({
-      accessToken: newAccessToken,
-      refreshToken: newRefreshToken
-    });
   } catch (error) {
-    res.status(401).json({ message: 'Invalid refresh token' });
+    console.error('Token refresh error:', error);
+    sendError(res, 500, 'Error refreshing token', 'TOKEN_REFRESH_ERROR', error.message);
   }
 });
 
-/**
- * @swagger
- * /api/auth/admin/login:
- *   post:
- *     summary: Admin login
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - email
- *               - password
- *             properties:
- *               email:
- *                 type: string
- *               password:
- *                 type: string
- *     responses:
- *       200:
- *         description: Admin login successful
- *       401:
- *         description: Invalid credentials
- */
 router.post('/admin/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    if (!email || !password)
+      return sendError(res, 400, 'Email and password are required');
+
     const user = await User.findOne({ email, role: 'admin' });
-    if (!user) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
+    if (!user) return sendError(res, 401, 'Invalid credentials');
 
     const isPasswordValid = await user.comparePassword(password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
+    if (!isPasswordValid) return sendError(res, 401, 'Invalid credentials');
 
     const accessToken = generateToken(user._id);
     const refreshToken = generateRefreshToken(user._id);
@@ -241,6 +211,7 @@ router.post('/admin/login', async (req, res) => {
     await user.save();
 
     res.json({
+      message: 'Admin login successful',
       accessToken,
       refreshToken,
       user: {
@@ -250,10 +221,10 @@ router.post('/admin/login', async (req, res) => {
         role: user.role
       }
     });
+
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    return sendError(res, 500, error.message);
   }
 });
 
 module.exports = router;
-

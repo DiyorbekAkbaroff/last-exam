@@ -20,7 +20,7 @@ const swaggerOptions = {
     },
     servers: [
       {
-        url: `http://localhost:${process.env.PORT || 3000}`,
+        url: 'http://localhost:4000',
         description: 'Development server'
       }
     ],
@@ -49,10 +49,10 @@ app.use('/api/client', clientRoutes);
 app.use('/api/admin', adminRoutes);
 
 app.get('/', (req, res) => {
-  res.json({ message: 'Mezon API is running' });
+  res.json({ message: 'EXAM API is running' });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });

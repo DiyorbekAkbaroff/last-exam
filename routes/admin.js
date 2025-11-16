@@ -1,115 +1,72 @@
 const express = require('express');
 const router = express.Router();
 const Product = require('../models/Product');
-const { adminAuth } = require('../middleware/auth');
+const { auth, adminAuth } = require('../middleware/auth');
 
-/**
- * @swagger
- * /api/admin/products:
- *   post:
- *     summary: Add new product
- *     tags: [Admin]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - name
- *               - description
- *               - price
- *             properties:
- *               name:
- *                 type: string
- *               description:
- *                 type: string
- *               price:
- *                 type: number
- *               image:
- *                 type: string
- *               category:
- *                 type: string
- *               stock:
- *                 type: number
- *     responses:
- *       201:
- *         description: Product created
- */
-router.post('/products', adminAuth, async (req, res) => {
+router.post('/products', auth, adminAuth, async (req, res) => {
   try {
     const { name, description, price, image, category, stock } = req.body;
 
+    // Validation
+    if (!name || !price) {
+      return res.status(400).json({ message: 'Name and price are required' });
+    }
+
+    if (isNaN(price) || price < 0) {
+      return res.status(400).json({ message: 'Price must be a valid number' });
+    }
+
+    if (stock && (isNaN(stock) || stock < 0)) {
+      return res.status(400).json({ message: 'Stock must be a valid number' });
+    }
+
     const product = new Product({
       name,
-      description,
+      description: description || '',
       price,
-      image,
-      category,
-      stock
+      image: image || '',
+      category: category || 'General',
+      stock: stock || 0
     });
 
     await product.save();
-    res.status(201).json(product);
+    res.status(201).json({
+      message: 'Product created successfully',
+      product
+    });
+
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-/**
- * @swagger
- * /api/admin/products/{id}:
- *   delete:
- *     summary: Delete product
- *     tags: [Admin]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Product deleted
- */
-router.delete('/products/:id', adminAuth, async (req, res) => {
+router.delete('/products/:id', auth, adminAuth, async (req, res) => {
   try {
     const product = await Product.findByIdAndDelete(req.params.id);
-    
+
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
     }
 
     res.json({ message: 'Product deleted successfully' });
+
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-/**
- * @swagger
- * /api/admin/products:
- *   get:
- *     summary: Get all products (Admin)
- *     tags: [Admin]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: List of products
- */
-router.get('/products', adminAuth, async (req, res) => {
+router.get('/products', auth, adminAuth, async (req, res) => {
   try {
-    const products = await Product.find();
-    res.json(products);
+    const products = await Product.find().sort({ createdAt: -1 });
+
+    res.json({
+      count: products.length,
+      products
+    });
+
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 module.exports = router;
-

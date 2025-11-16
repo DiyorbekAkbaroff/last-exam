@@ -3,8 +3,8 @@ const QRCode = require('qrcode');
 
 const generateSecret = (email) => {
   return speakeasy.generateSecret({
-    name: `Mezon (${email})`,
-    issuer: 'Mezon'
+    name: `EXAM (${email})`,
+    issuer: 'EXAM'
   });
 };
 
